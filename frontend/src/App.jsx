@@ -5,6 +5,10 @@ import { db, storage, functions } from './firebase-config'; // Impor 'storage' d
 import { collection, addDoc, onSnapshot, query, orderBy, serverTimestamp, getDocs, query as fsQuery, orderBy as fsOrderBy } from 'firebase/firestore';
 import { ref, uploadBytesResumable, getDownloadURL } from 'firebase/storage'; // Impor fungsi Storage
 import { httpsCallable } from "firebase/functions";
+import { getApps } from "firebase/app";
+
+console.log("Firebase apps:", getApps());
+console.log("ProjectId:", db.app.options.projectId);
 
 const generateMusic = httpsCallable(functions, "generateMusic");
 const getMusicStatus = httpsCallable(functions, "getMusicStatus");
