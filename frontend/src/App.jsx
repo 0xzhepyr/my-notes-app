@@ -1,9 +1,13 @@
 // src/App.jsx
 import { useState, useEffect } from 'react';
 // Impor storage, ref, uploadBytesResumable, getDownloadURL
-import { db, storage } from './firebase-config'; // Impor 'storage' dari file konfigurasi
-import { collection, addDoc, onSnapshot, query, orderBy, serverTimestamp } from 'firebase/firestore';
+import { db, storage, functions } from './firebase-config'; // Impor 'storage' dari file konfigurasi
+import { collection, addDoc, onSnapshot, query, orderBy, serverTimestamp, getDocs, query as fsQuery, orderBy as fsOrderBy } from 'firebase/firestore';
 import { ref, uploadBytesResumable, getDownloadURL } from 'firebase/storage'; // Impor fungsi Storage
+import { httpsCallable } from "firebase/functions";
+
+const generateMusic = httpsCallable(functions, "generateMusic");
+const getMusicStatus = httpsCallable(functions, "getMusicStatus");
 
 function App() {
   const [notes, setNotes] = useState([]);
@@ -11,6 +15,14 @@ function App() {
   const [imageUpload, setImageUpload] = useState(null); // State untuk file gambar yang dipilih
   const [uploadProgress, setUploadProgress] = useState(0); // State untuk progress upload
   const [isUploading, setIsUploading] = useState(false); // State untuk status upload
+  const [musicPrompt, setMusicPrompt] = useState(''); // State untuk prompt musik
+  const [isGeneratingMusic, setIsGeneratingMusic] = useState(false); // State untuk status generate musik
+  const [generatedMusic, setGeneratedMusic] = useState(null); // State untuk menyimpan hasil musik
+  const [musicStatus, setMusicStatus] = useState(null); // State untuk status polling
+  const [showLyric, setShowLyric] = useState(false); // State untuk show/hide lyric
+  const [pollingTaskId, setPollingTaskId] = useState(null); // TaskId yang sedang dipolling
+  const [songs, setSongs] = useState([]); // State untuk gallery lagu
+  const [showLyricMap, setShowLyricMap] = useState({}); // State show lirik per lagu
   const notesCollectionRef = collection(db, 'notes');
 
   useEffect(() => {
@@ -23,6 +35,58 @@ function App() {
       setNotes(notesData);
     });
     return () => unsubscribe();
+  }, []);
+
+  // Polling otomatis ke getMusicStatus
+  useEffect(() => {
+    if (!pollingTaskId) return;
+    let intervalId = null;
+    let stopped = false;
+    async function pollStatus() {
+      try {
+        const res = await getMusicStatus({ taskId: pollingTaskId });
+        if (res.data && res.data.success && res.data.data) {
+          setMusicStatus(res.data.data);
+          // Jika sudah ada stream_audio_url dan status success, stop polling
+          if (
+            Array.isArray(res.data.data.data) &&
+            res.data.data.data.length > 0 &&
+            res.data.data.data[0].stream_audio_url
+          ) {
+            stopped = true;
+            clearInterval(intervalId);
+          }
+        }
+      } catch (err) {
+        // Optional: handle error
+      }
+    }
+    pollStatus();
+    intervalId = setInterval(() => {
+      if (!stopped) pollStatus();
+    }, 3000);
+    return () => clearInterval(intervalId);
+  }, [pollingTaskId]);
+
+  // Fetch semua lagu dari Firestore untuk gallery
+  useEffect(() => {
+    async function fetchSongs() {
+      const q = fsQuery(collection(db, 'sunoCallbacks'), fsOrderBy('receivedAt', 'desc'));
+      const snap = await getDocs(q);
+      // Log isi dokumen untuk debug
+      snap.forEach(doc => {
+        console.log("Isi dokumen:", doc.data());
+      });
+      const allSongs = [];
+      snap.forEach(doc => {
+        const arr = doc.data().data?.data;
+        if (Array.isArray(arr)) {
+          arr.forEach(song => allSongs.push(song));
+        }
+      });
+      setSongs(allSongs);
+    }
+    fetchSongs();
   }, []);
 
   // Fungsi untuk upload gambar
@@ -83,6 +147,32 @@ function App() {
     }
   };
 
+  // Fungsi untuk generate musik menggunakan Suno API
+  const handleGenerateMusic = async () => {
+    if (!musicPrompt.trim()) {
+      alert('Masukkan prompt untuk generate musik!');
+      return;
+    }
+    setIsGeneratingMusic(true);
+    setMusicStatus(null);
+    setShowLyric(false);
+    alert('Permintaan generate lagu dikirim, mohon tunggu hasilnya...');
+    try {
+      const result = await generateMusic({ prompt: musicPrompt });
+      if (result.data.success) {
+        setGeneratedMusic(result.data);
+        setPollingTaskId(result.data.taskId); // Mulai polling status
+        setMusicPrompt('');
+      } else {
+        alert('Gagal generate musik: ' + result.data.message);
+      }
+    } catch (error) {
+      alert('Error: ' + (error.message || 'Terjadi kesalahan saat generate musik'));
+    } finally {
+      setIsGeneratingMusic(false);
+    }
+  };
+
   return (
     <div style={{ padding: '20px', fontFamily: 'Arial, sans-serif', maxWidth: '600px', margin: 'auto' }}>
       <h1>Aplikasi Catatan & Foto Firebase</h1>
@@ -137,38 +227,117 @@ function App() {
         </button>
       </div>
 
-      {/* Daftar Catatan */}
-      <div style={{ borderTop: '1px solid #eee', paddingTop: '20px' }}>
-        <h2>Daftar Catatan</h2>
-        {notes.length === 0 ? (
-          <p>Belum ada catatan. Tambahkan satu!</p>
+      {/* Form Generate Musik AI */}
+      <div style={{ marginBottom: '20px', border: '1px solid #ddd', padding: '15px', borderRadius: '8px', backgroundColor: '#f8f9fa' }}>
+        <h3 style={{ marginTop: '0', color: '#333' }}>🎵 Generate Musik AI dengan Suno</h3>
+        <input
+          type="text"
+          value={musicPrompt}
+          onChange={(e) => setMusicPrompt(e.target.value)}
+          placeholder="Contoh: musik pop ceria dengan gitar akustik..."
+          style={{ 
+            padding: '10px', 
+            width: 'calc(100% - 22px)', 
+            marginBottom: '10px', 
+            borderRadius: '5px', 
+            border: '1px solid #ddd',
+            fontSize: '14px'
+          }}
+        />
+        <button
+          onClick={handleGenerateMusic}
+          disabled={isGeneratingMusic}
+          style={{
+            padding: '10px 15px',
+            backgroundColor: isGeneratingMusic ? '#ccc' : '#28a745',
+            color: 'white',
+            border: 'none',
+            borderRadius: '5px',
+            cursor: isGeneratingMusic ? 'not-allowed' : 'pointer',
+            fontSize: '14px'
+          }}
+        >
+          {isGeneratingMusic ? 'Mengirim prompt...' : 'Generate Musik'}
+        </button>
+        
+        {/* Status Generate Musik */}
+        {isGeneratingMusic && (
+          <div style={{ 
+            marginTop: '10px', 
+            padding: '10px', 
+            backgroundColor: '#e3f2fd', 
+            borderRadius: '5px',
+            border: '1px solid #2196F3'
+          }}>
+            <p style={{ margin: '0', color: '#1976d2' }}>
+              ⏳ Sedang generate musik... Ini bisa memakan waktu 1-2 menit.
+            </p>
+          </div>
+        )}
+
+        {/* Hasil Musik */}
+        {pollingTaskId && (
+          <div style={{ marginTop: 24, borderTop: '1px solid #eee', paddingTop: 16 }}>
+            {!musicStatus || !musicStatus.data || !musicStatus.data[0] || !musicStatus.data[0].stream_audio_url ? (
+              <div>Menunggu hasil generate musik...</div>
+            ) : (
+              <div>
+                <h2>{musicStatus.data[0].title}</h2>
+                <img src={musicStatus.data[0].image_url} alt={musicStatus.data[0].title} style={{ width: '100%', borderRadius: 8 }} />
+                <audio controls src={musicStatus.data[0].stream_audio_url} style={{ width: '100%', marginTop: 16 }} />
+                <div style={{ marginTop: 16 }}>
+                  <a href={musicStatus.data[0].stream_audio_url} download>
+                    <button>Download</button>
+                  </a>
+                  <button style={{ marginLeft: 8 }} onClick={() => setShowLyric((v) => !v)}>
+                    {showLyric ? 'Hide Lyric' : 'Show Lyric'}
+                  </button>
+                </div>
+                {showLyric && (
+                  <pre style={{
+                    background: '#f5f5f5',
+                    padding: 16,
+                    borderRadius: 8,
+                    marginTop: 16,
+                    whiteSpace: 'pre-wrap'
+                  }}>
+                    {musicStatus.data[0].prompt}
+                  </pre>
+                )}
+              </div>
+            )}
+          </div>
+        )}
+      </div>
+
+      {/* Gallery Lagu */}
+      <div style={{ marginTop: 32 }}>
+        <h2>Gallery Lagu</h2>
+        {songs.length === 0 ? (
+          <div>Belum ada lagu yang di-generate.</div>
         ) : (
-          <ul style={{ listStyle: 'none', padding: 0 }}>
-            {notes.map((note) => (
-              <li key={note.id} style={{
-                backgroundColor: '#f9f9f9',
-                padding: '10px',
-                marginBottom: '10px',
-                borderRadius: '5px',
-                border: '1px solid #eee',
-                wordWrap: 'break-word'
-              }}>
-                {note.text}
-                {note.imageUrl && ( // Tampilkan gambar jika ada URL-nya
-                  <img 
-                    src={note.imageUrl} 
-                    alt="Catatan Gambar" 
-                    style={{ maxWidth: '100%', height: 'auto', display: 'block', marginTop: '10px', borderRadius: '5px' }} 
-                  />
+          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 24 }}>
+            {songs.map((song, idx) => (
+              <div key={song.id + idx} style={{ width: 260, border: '1px solid #eee', borderRadius: 8, padding: 12, background: '#fafbfc' }}>
+                <img src={song.image_url} alt={song.title} style={{ width: '100%', borderRadius: 6 }} />
+                <h4 style={{ margin: '8px 0 4px 0' }}>{song.title}</h4>
+                <audio controls src={song.stream_audio_url} style={{ width: '100%' }} />
+                <div style={{ marginTop: 8 }}>
+                  <a href={song.stream_audio_url} download>
+                    <button>Download</button>
+                  </a>
+                  <button style={{ marginLeft: 8 }} onClick={() => setShowLyricMap(m => ({ ...m, [song.id]: !m[song.id] }))}>
+                    {showLyricMap[song.id] ? 'Hide Lyric' : 'Show Lyric'}
+                  </button>
+                </div>
+                {showLyricMap[song.id] && (
+                  <pre style={{ background: '#f5f5f5', padding: 8, borderRadius: 6, marginTop: 8, whiteSpace: 'pre-wrap', fontSize: 13 }}>
+                    {song.prompt}
+                  </pre>
                 )}
-                {note.createdAt && (
-                  <span style={{ fontSize: '0.8em', color: '#888', display: 'block', marginTop: '5px' }}>
-                    {new Date(note.createdAt.seconds * 1000).toLocaleString()}
-                  </span>
-                )}
-              </li>
+              </div>
             ))}
-          </ul>
+          </div>
         )}
       </div>
     </div>
